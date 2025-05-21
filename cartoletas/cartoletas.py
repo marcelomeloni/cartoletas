@@ -1,10 +1,25 @@
-import pygame
+
 import sys
 import random
 import os
 import math
 from datetime import datetime
+import subprocess
+
+
+
+# Função para garantir que o pygame esteja instalado
+def instalar_dependencia(pacote):
+    try:
+        __import__(pacote)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pacote])
+
+# Verificar e instalar o pygame
+instalar_dependencia('pygame')
+import pygame
 import pygame.locals as pl
+
 # Matriz de pontuação fixa: SCORE_MATRIX[dificuldade][regiao]
 SCORE_MATRIX = {
     0: {0: 5, 1: 5, 2: 10, 3: 10, 4: 15},   # Fácil
@@ -290,9 +305,40 @@ def carregar_rankings():
     except FileNotFoundError:
         return {'Fácil': [], 'Médio': [], 'Difícil': []}
 def salvar_pontuacao(nome, pontos, dificuldade):
+    # Verificar se o jogador já existe no ranking com a mesma pontuação e dificuldade
+    try:
+        with open(RANKING_FILE, 'r') as f:
+            linhas = f.readlines()
+            # Verificar se já existe uma entrada para o jogador com a mesma pontuação e dificuldade
+            for linha in linhas:
+                partes = linha.strip().split(';')
+                if len(partes) == 4:
+                    nome_existente, pontos_existentes, dificuldade_existente, _ = partes
+                    if nome_existente == nome and int(pontos_existentes) == pontos and dificuldade_existente == dificuldade:
+                        return  # Não salva novamente, já existe uma entrada
+    except FileNotFoundError:
+        # Caso o arquivo não exista ainda, nada a fazer
+        pass
+
+    # Se não encontrou uma entrada duplicada, salva a pontuação
     data = datetime.now().strftime("%d/%m/%Y %H:%M")
     with open(RANKING_FILE, 'a') as f:
         f.write(f"{nome};{pontos};{dificuldade};{data}\n")
+
+    # Limitar o número de entradas no ranking (top 10)
+    rankings = carregar_rankings()  # Carrega o ranking atual
+    if dificuldade in rankings:
+        rankings[dificuldade] = sorted(rankings[dificuldade], key=lambda x: (-x[1], x[2]))[:10]  # Ordena e mantém apenas os 10 melhores
+
+    # Reescrever o arquivo com os rankings limitados
+    with open(RANKING_FILE, 'w') as f:
+        for dificuldade, jogadores in rankings.items():
+            for jogador in jogadores:
+                nome, pontos, data = jogador
+                f.write(f"{nome};{pontos};{dificuldade};{data}\n")
+
+
+
 # Seleção de dificuldade centralizada
 def selecionar_dificuldade(tela):
     fonte = pygame.font.SysFont(None, 36)
@@ -346,14 +392,34 @@ def selecionar_dificuldade(tela):
             tela.blit(txt, (txt_x, txt_y))
         
         pygame.display.flip()
-# Função principal do jogo
+class Jogo:
+    def __init__(self, tela, nome_jogador, dificuldade, notificacoes):
+        self.tela = tela
+        self.nome_jogador = nome_jogador
+        self.dificuldade = dificuldade
+        self.pontuacao_acumulada = 0  # Inicializa a pontuação acumulada
+        self.notificacoes = notificacoes  # Instância de Notificação
+
+    def acumular_pontos(self, pontos):
+        """Acumula pontos durante o jogo"""
+        self.pontuacao_acumulada += pontos
+
+    def finalizar_jogo(self):
+        """Salva a pontuação final quando o jogo terminar"""
+        salvar_pontuacao(self.nome_jogador, self.pontuacao_acumulada, self.dificuldade)
+
+    def executar_notificacao(self, pontos):
+        """Dispara a notificação e acumula os pontos"""
+        self.notificacoes.disparar_notificacao(pontos)
+        self.acumular_pontos(pontos)  # Acumula os pontos
+
 def iniciar_jogo(tela, diff_id, nome_jogador):
-    notificacoes = Notificacao()
+    notificacoes = Notificacao()  # Criação da instância de Notificação
     _, pares, pesos = DIFICULDADES[diff_id]
     regioes = list(pesos.keys())
     pesos_list = [pesos[r] for r in regioes]
     escolhidos = []
-    
+
     # Seleção dos times
     while len(escolhidos) < pares:
         reg = random.choices(regioes, weights=pesos_list, k=1)[0]
@@ -374,21 +440,21 @@ def iniciar_jogo(tela, diff_id, nome_jogador):
     random.shuffle(deck)
 
     if diff_id == 0:    # Fácil
-        cols = 3
+        cols = 5
     elif diff_id == 1:  # Médio
-        cols = 4
-    else:               # Difícil
         cols = 6
-    
+    else:               # Difícil
+        cols = 7
+
     rows = math.ceil(len(deck) / cols)
-    cell_padding = 20  # Espaço entre cartas
+    cell_padding = 20  # Espaço entre as cartas
     max_card_width = tela.get_width() // cols - cell_padding
     max_card_height = tela.get_height() // rows - cell_padding
-    
-    # Centralizar o grid na tela
-    total_grid_width = cols * max_card_width + (cols-1)*cell_padding
+
+    # Centralizando o grid na tela
+    total_grid_width = cols * max_card_width + (cols - 1) * cell_padding
     start_x = (tela.get_width() - total_grid_width) // 2
-    
+
     cartas = []
     for i, (reg, time_id, tipo) in enumerate(deck):
         r, c = divmod(i, cols)
@@ -400,17 +466,17 @@ def iniciar_jogo(tela, diff_id, nome_jogador):
         carta.set_rect_and_scale(cell)
         cartas.append(carta)
 
+    # Criando instância da classe Jogo e passando a instância de notificações
+    jogo = Jogo(tela, nome_jogador, DIFICULDADES[diff_id][0], notificacoes)
+
     # Variáveis do jogo
     selecionadas = []
-    pontos = 0
     clock = pygame.time.Clock()
     fonte = pygame.font.SysFont(None, 48)
     comparando = False
     tempo_virada = 0
     inicio_jogo = pygame.time.get_ticks()
     jogo_ativo = True
-    notificacoes = Notificacao()
-    pontos_antes = 0
     # Loop principal do jogo
     while jogo_ativo:
         tempo_atual = pygame.time.get_ticks()
@@ -447,38 +513,37 @@ def iniciar_jogo(tela, diff_id, nome_jogador):
             if (a.regiao_id, a.time_id) == (b.regiao_id, b.time_id):
                 a.matched = b.matched = True 
                 pontos_ganhos = SCORE_MATRIX[diff_id][a.regiao_id]
-                pontos += pontos_ganhos
-                notificacoes.disparar_notificacao(pontos_ganhos)
+                jogo.executar_notificacao(pontos_ganhos)
             else:   
                 a.flip()
                 b.flip()
             selecionadas.clear()
             comparando = False
-        
+
         # Atualizar notificações
         notificacoes.update()
 
         # Textos
-        textp = fonte.render(f"Pontos: {pontos}", True, COR_TEXTO)
+        textp = fonte.render(f"Pontos: {jogo.pontuacao_acumulada}", True, COR_TEXTO)  # Mostra a pontuação acumulada
         tela.blit(textp, (20, 20))
         texto_tempo = fonte.render(f"Tempo: {tempo_restante//1000}s", True, COR_TEXTO)
         tela.blit(texto_tempo, (tela.get_width()-200, 20))
         notificacoes.draw(tela)
-          # Finalização e salvamento
-        salvar_pontuacao(nome_jogador, pontos, DIFICULDADES[diff_id][0])
+        
         pygame.display.flip()
         clock.tick(60)
 
-  
+    # Ao fim do jogo, salvar pontuação
+    jogo.finalizar_jogo()
     
     # Mostrar tela de game over
-    if tela_game_over(tela, pontos, tempo_restante <= 0):
+    if tela_game_over(tela, jogo.pontuacao_acumulada, tempo_restante <= 0):
         return 
 
-    textp = fonte.render(f"Pontos: {pontos}", True, COR_TEXTO)
+    textp = fonte.render(f"Pontos: {jogo.pontuacao_acumulada}", True, COR_TEXTO)  # Mostra a pontuação final
     tela.blit(textp, (20, 20))
     pygame.display.flip()
-    clock.tick(60)  
+    clock.tick(60)
 def tela_game_over(tela, pontos, tempo_esgotado):
     fonte = pygame.font.SysFont(None, 48)
     btn_menu = pygame.image.load(os.path.join('assets', 'images', 'button_menu.png'))
